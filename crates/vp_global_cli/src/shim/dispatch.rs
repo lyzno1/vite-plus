@@ -722,9 +722,9 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     }
 
     // Check recursion prevention - if already in a shim context, passthrough directly
-    // Only applies to core tools whose bin dir is prepended to PATH.
-    // Package binaries are always resolved via metadata lookup, so they can't loop.
-    if std::env::var(RECURSION_ENV_VAR).is_ok() && is_core_shim_tool(tool) {
+    // Node/npm bin dirs are prepared for every managed invocation. Other package
+    // managers must resolve independently: their bin dirs may not be on PATH yet.
+    if std::env::var(RECURSION_ENV_VAR).is_ok() && matches!(tool, "node" | "npm" | "npx") {
         tracing::debug!("recursion prevention enabled for core tool");
         return passthrough_to_system(tool, args);
     }
