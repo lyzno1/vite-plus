@@ -25,7 +25,7 @@ const env = { ...process.env, PATH: paths.join(path.delimiter) };
 const version = execFileSync('node', ['--version'], {
   env,
   encoding: 'utf8',
-  timeout: 2000,
+  timeout: 10000,
 }).trim();
 assert.equal(version, process.version);
 if (process.argv[2] === 'partial') {

@@ -1,4 +1,17 @@
 [[case]]
+name = "nested_pnpm_preserves_inherited_npm"
+vp = "global"
+steps = [
+  { argv = ["vpt", "write-file", ".node-version", "22.18.0"], snapshot = false },
+  { argv = ["vpt", "json-edit", "package.json", "packageManager", "npm@10.5.0"], snapshot = false },
+  { argv = ["vp", "env", "on", "npm"], snapshot = false },
+  { argv = ["vp", "env", "on", "pnpm"], snapshot = false },
+  { argv = ["npx", "--version"], snapshot = false },
+  { argv = ["pnpm", "--version"], cwd = "pnpm-child", snapshot = false },
+  { argv = ["npx", "--offline", "--call", "node assert-inherited-npm.cjs"], comment = "A child project can add its pinned pnpm without replacing the parent's Node or npm/npx" },
+]
+
+[[case]]
 name = "global_package_keeps_its_node_after_npx"
 vp = "global"
 steps = [

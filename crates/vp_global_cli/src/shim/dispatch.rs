@@ -805,8 +805,10 @@ pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     // Ensure Node.js is installed and locate its binary for PATH preparation.
     // Package-manager shims can use their own declared version, but JS-based
     // package managers still need the Node.js runtime selected by its mode.
-    let system_node = if env.contains("node") {
-        find_system_tool("node")
+    let inherited_node = env.contains("node").then(|| find_system_tool("node")).flatten();
+    let node_is_inherited = inherited_node.is_some();
+    let system_node = if node_is_inherited {
+        inherited_node
     } else if PackageManagerType::from_tool(tool).is_some() {
         match config::load_config().await {
             Ok(config) if config.node_shim_mode == ShimMode::SystemFirst => {
@@ -875,11 +877,16 @@ pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     // bin dir available for JS package-manager shims, and put a separately
     // installed PM bin dir first so nested invocations see the same PM version.
     let node_bin_dir = node_path.parent().expect("Node has no parent directory");
-    let mut child_env = match prepare_js_child_path(&cwd, node_bin_dir, env).await {
-        Ok(env) => env,
-        Err(error) => {
-            eprintln!("vp: Failed to prepare child process PATH: {error}");
-            return 1;
+    let mut child_env = if node_is_inherited {
+        // Adding a missing tool must retain the parent's Node and npm precedence.
+        env
+    } else {
+        match prepare_js_child_path(&cwd, node_bin_dir, env).await {
+            Ok(env) => env,
+            Err(error) => {
+                eprintln!("vp: Failed to prepare child process PATH: {error}");
+                return 1;
+            }
         }
     };
     if let Some(kind) = PackageManagerType::from_tool(tool)
@@ -1290,7 +1297,8 @@ fn locate_tool(node_path: &AbsolutePath, tool: &str) -> Result<AbsolutePathBuf, 
     if tool == "node" {
         return Ok(node_path.to_absolute_path_buf());
     }
-    let node_path = node_path.as_path().canonicalize().map_err(|error| error.to_string())?;
+    // The resolved directory enters PATH and must also work with Windows .cmd scripts.
+    let node_path = dunce::canonicalize(node_path).map_err(|error| error.to_string())?;
     let node_path = AbsolutePathBuf::new(node_path).expect("canonical Node path must be absolute");
     let bin_dir = node_path.parent().ok_or_else(|| "Node has no bin directory".to_string())?;
 
