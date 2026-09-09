@@ -2113,7 +2113,7 @@ $ vp env --current --json
 | `VP_LOG`                 | Log level: debug, info, warn, error                                                             | `warn`         |
 | `VP_DEBUG_SHIM`          | Enable extra shim diagnostics                                                                   | unset          |
 | `VP_BYPASS`              | PATH-style list of bin dirs to skip when finding system tools; set `=1` to bypass shim entirely | unset          |
-| `VP_PATH_INJECTED_TOOLS` | **Internal**: Records tools with real binary directories injected into PATH                                                           | unset          |
+| `VP_PATH_INJECTED_TOOLS` | **Internal**: Records tools with real binary directories injected into PATH                     | unset          |
 | `VP_ENV_USE_EVAL_ENABLE` | **Internal**: Set by shell wrappers to signal that `vp env use` output will be eval'd           | unset          |
 
 ## Unix-Specific Considerations

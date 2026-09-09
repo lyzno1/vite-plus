@@ -221,15 +221,15 @@ only KERNEL32.
 
 The sidecar controls the directory environment inherited by `vp.exe`:
 
-| Variable            | When                    | Trampoline action                                      |
-| ------------------- | ----------------------- | ------------------------------------------------------ |
-| `VP_HOME`           | Single-root layout      | Sets all Vite+ directories from the sidecar data root  |
-| `VP_HOME`           | Split layout            | Removes the value so it cannot override separate roots |
-| `VP_DATA_DIR`       | Split layout            | Sets the payload and state root                        |
-| `VP_BIN_DIR`        | Split layout            | Sets the directory that contains the shim              |
-| `VP_CACHE_DIR`      | Split layout            | Sets the cache root                                    |
-| `VP_SHIM_TOOL`      | Tool shims, except `vp` | Selects the named tool for shim dispatch               |
-| `VP_PATH_INJECTED_TOOLS` | Tool shims          | Preserves the tools already injected into PATH         |
+| Variable                 | When                    | Trampoline action                                      |
+| ------------------------ | ----------------------- | ------------------------------------------------------ |
+| `VP_HOME`                | Single-root layout      | Sets all Vite+ directories from the sidecar data root  |
+| `VP_HOME`                | Split layout            | Removes the value so it cannot override separate roots |
+| `VP_DATA_DIR`            | Split layout            | Sets the payload and state root                        |
+| `VP_BIN_DIR`             | Split layout            | Sets the directory that contains the shim              |
+| `VP_CACHE_DIR`           | Split layout            | Sets the cache root                                    |
+| `VP_SHIM_TOOL`           | Tool shims, except `vp` | Selects the named tool for shim dispatch               |
+| `VP_PATH_INJECTED_TOOLS` | Tool shims              | Preserves the tools already injected into PATH         |
 
 ### Ctrl+C Handling
 
