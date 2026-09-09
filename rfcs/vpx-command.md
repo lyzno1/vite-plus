@@ -303,8 +303,7 @@ The dispatch module also exposes helper functions as `pub(crate)` for vpx to reu
 
 - `find_package_for_binary()` — looks up which globally installed package provides a binary
 - `locate_package_binary()` — locates the actual binary path inside a package
-- `ensure_installed()` — ensures a Node.js version is downloaded
-- `locate_tool()` — locates a tool binary within a Node.js installation
+- `ensure_installed()` — ensures a Node.js version is downloaded and returns its executable path
 
 ### 3. Binary Resolution (`commands/vpx.rs`)
 
@@ -325,7 +324,9 @@ if let Some(path_bin) = find_on_path(&cmd_name) { ... }
 // 4. Remote download — delegates to DlxCommand
 ```
 
-Before executing any found binary, `prepend_node_modules_bin_to_path()` walks up from cwd and prepends all existing `node_modules/.bin` directories to PATH.
+Before executing any found binary, `prepend_node_modules_bin_to_path()` walks up from cwd and prepends all existing `node_modules/.bin` directories to a child `ToolPathEnv`, preserving inherited tool markers. These local directories do not add tools to `VP_PATH_INJECTED_TOOLS`.
+
+For a globally installed binary, vpx first injects the package's selected Node.js directory and records `node` in `VP_PATH_INJECTED_TOOLS`. Execution passes the prepared PATH and tool markers together to the child process.
 
 ### 4. Setup
 
