@@ -147,7 +147,8 @@ steps = [
   { argv = ["vp", "env", "exec", "--node", "22.18.0", "node", "assert-system-node-shim.cjs", "setup"], snapshot = false },
   { argv = ["vp", "env", "off", "node"], snapshot = false },
   { argv = ["vp", "env", "on", "npm"], snapshot = false },
-  { argv = ["node", "assert-system-node-shim.cjs"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin"]], comment = "Bundled npm/npx and their children use Node 22 behind the system shim despite the project's Node 20 pin" },
+  { argv = ["./system-shims/node", "assert-system-node-shim.cjs"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin"]], comment = "Launch the external Node shim directly so npm/npx resolve through vp without inheriting VP_BYPASS" },
+  { argv = ["./system-shims/node", "assert-system-node-shim.cjs", "preload"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin"]], comment = "Preload output cannot corrupt the runtime probe, and npm/npx and their Node children still execute the preload" },
 ]
 
 [[case]]

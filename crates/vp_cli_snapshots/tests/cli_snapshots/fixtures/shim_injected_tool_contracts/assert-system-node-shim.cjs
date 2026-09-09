@@ -17,12 +17,28 @@ if (process.argv[2] === 'setup') {
     symlinkSync('../manager/tool-manager', `system-shims/${tool}`);
   }
 } else {
+  assert.equal(process.env.VP_BYPASS, undefined);
+  const preload = process.argv[2] === 'preload';
+  const options = {
+    encoding: 'utf8',
+    timeout: 10000,
+    env: preload
+      ? { ...process.env, NODE_OPTIONS: '--require ./preload-output.cjs' }
+      : process.env,
+  };
   for (const tool of ['npm', 'npx']) {
-    const options = { encoding: 'utf8', timeout: 10000 };
-    assert.equal(execFileSync(tool, ['--version'], options).trim(), '10.9.3');
-    const args = ['--offline', '--call', 'node --version'];
+    assert.equal(
+      execFileSync(tool, ['--version'], options).trim(),
+      preload ? 'preload start\n10.9.3\npreload exit' : '10.9.3',
+    );
+    const args = ['--offline', '--call', 'node -e "console.log(process.version)"'];
     if (tool === 'npm') args.unshift('exec');
-    assert.equal(execFileSync(tool, args, options).trim(), process.version);
+    assert.equal(
+      execFileSync(tool, args, options).trim(),
+      preload
+        ? `preload start\npreload start\n${process.version}\npreload exit\npreload exit`
+        : process.version,
+    );
   }
   console.log('Bundled npm/npx use the runtime behind the system Node shim');
 }

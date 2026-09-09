@@ -12,9 +12,17 @@
 ## `vp env on npm`
 
 
-## `PATH=${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin node assert-system-node-shim.cjs`
+## `PATH=${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin ./system-shims/node assert-system-node-shim.cjs`
 
-Bundled npm/npx and their children use Node 22 behind the system shim despite the project's Node 20 pin
+Launch the external Node shim directly so npm/npx resolve through vp without inheriting VP_BYPASS
+
+```
+Bundled npm/npx use the runtime behind the system Node shim
+```
+
+## `PATH=${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin ./system-shims/node assert-system-node-shim.cjs preload`
+
+Preload output cannot corrupt the runtime probe, and npm/npx and their Node children still execute the preload
 
 ```
 Bundled npm/npx use the runtime behind the system Node shim

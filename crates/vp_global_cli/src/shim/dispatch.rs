@@ -1304,6 +1304,8 @@ fn resolve_bundled_tool(
         // A version-manager shim may resolve to the manager binary rather than Node.
         let output = std::process::Command::new(node_path.as_path())
             .args(["-p", "process.execPath"])
+            // User preloads belong to the actual command, not this runtime probe.
+            .env_remove("NODE_OPTIONS")
             .output()
             .map_err(|error| format!("Failed to query Node executable: {error}"))?;
         if !output.status.success() {
