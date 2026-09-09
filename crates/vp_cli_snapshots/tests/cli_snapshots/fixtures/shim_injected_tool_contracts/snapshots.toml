@@ -54,3 +54,46 @@ vp = "global"
 steps = [
   { argv = ["vp", "env", "exec", "--node", "22.18.0", "node", "assert-inherited-path.cjs", "trampoline"], comment = "A trampoline from another installation must not be mistaken for the injected Node" },
 ]
+
+[[case]]
+name = "env_exec_resolves_target_project"
+vp = "global"
+steps = [
+  { argv = ["node", "assert-env-exec-selection.cjs", "project"], comment = "Explicit env exec resolves the target directory instead of reusing the parent Node" },
+]
+
+[[case]]
+name = "env_exec_resolves_environment_override"
+vp = "global"
+steps = [
+  { argv = ["node", "assert-env-exec-selection.cjs", "environment"], comment = "Explicit env exec honors a new VP_NODE_VERSION override" },
+]
+
+[[case]]
+name = "env_exec_wrapper_inherits_parent_node"
+vp = "global"
+steps = [
+  { argv = ["node", "assert-env-exec-selection.cjs", "wrapper"], comment = "Legacy shim wrappers retain the Node selected by their parent" },
+]
+
+[[case]]
+name = "system_pnpm_inherits_global_package_node"
+vp = "global"
+steps = [
+  { argv = ["vp", "install", "-g", "--node", "22.18.0", "./runtime-probe"], snapshot = false },
+  { argv = ["node", "setup-system-pnpm.cjs"], snapshot = false },
+  { argv = ["vp", "env", "off", "pnpm"], snapshot = false },
+  { argv = ["npx", "--offline", "--call", "injected-pnpm-probe"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-pnpm${PATH_SEPARATOR}${PATH}"]], comment = "System-first pnpm inherits the global package's Node instead of reselecting the project's Node" },
+]
+
+[[case]]
+name = "system_pnpm_preserves_independent_npm_pin"
+vp = "global"
+steps = [
+  { argv = ["vpt", "json-edit", "package.json", "packageManager", "npm@10.5.0"], snapshot = false },
+  { argv = ["vp", "env", "on", "npm"], snapshot = false },
+  { argv = ["vp", "install", "-g", "--node", "22.18.0", "./runtime-probe"], snapshot = false },
+  { argv = ["node", "setup-system-pnpm.cjs"], snapshot = false },
+  { argv = ["vp", "env", "off", "pnpm"], snapshot = false },
+  { argv = ["npx", "--offline", "--call", "injected-pnpm-probe 10.5.0"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-pnpm${PATH_SEPARATOR}${PATH}"]], comment = "Reusing Node for system pnpm must also retain independent npm precedence" },
+]

@@ -1916,6 +1916,8 @@ Both use the **exact same code path** as Unix symlinks (`shim::dispatch()`), ens
 
 `VP_PATH_INJECTED_TOOLS` is preserved through shim dispatch. Marked tools use PATH passthrough only when a real executable remains available, excluding Vite+ trampolines from any installation. If a child replaces PATH and removes that executable, normal tool resolution resumes.
 
+A direct `vp env exec` starts a fresh tool selection, honoring the target directory and environment overrides. Shim wrappers instead inherit the parent's selections. Choosing a system-first package manager preserves an already selected Node runtime and the existing PATH order.
+
 ### Explicit Version Mode Behavior
 
 When `--node` **is provided**:

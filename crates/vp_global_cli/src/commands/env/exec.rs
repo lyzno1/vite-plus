@@ -4,8 +4,8 @@
 //! 1. Explicit version: `vp env exec --node <version> [--npm <version>] <command>`
 //! 2. Shim mode: `vp env exec <tool> [args...]` where tool is node/npm/npx or a global package binary
 //!
-//! The shim mode uses the same dispatch logic as Unix symlinks, ensuring identical behavior
-//! across platforms (used by Windows .cmd wrappers and Git Bash shell scripts).
+//! Direct invocations resolve a fresh tool selection through shim dispatch.
+//! Windows .cmd wrappers and Git Bash shell scripts inherit tools like Unix shims.
 
 use std::process::ExitStatus;
 
@@ -28,7 +28,7 @@ use crate::{
 ///
 /// When `--node` is provided, runs a command with the specified Node.js version.
 /// When `--node` is not provided and the command is a shim tool (node/npm/npx or global package),
-/// uses the same shim dispatch logic as Unix symlinks.
+/// resolves a fresh selection through shim dispatch, unless invoked by a shim wrapper.
 pub async fn execute(
     cwd: &AbsolutePath,
     node_version: Option<&str>,
@@ -36,6 +36,7 @@ pub async fn execute(
     package_manager: Option<&str>,
     command: &[String],
 ) -> Result<ExitStatus, Error> {
+    let from_wrapper = std::env::var_os(env_vars::VP_SHIM_WRAPPER).is_some();
     let command = normalize_wrapper_command(command);
 
     if command.is_empty() {
@@ -66,12 +67,17 @@ pub async fn execute(
         // - Core tools: Version resolved from .node-version/package.json/default
         // - Package binaries: Uses Node.js version from package metadata
         // - Automatic Node.js download if needed
-        // - Reuse of tools already injected into PATH
         // - Shim mode checking (managed vs system-first)
+        // Explicit env exec starts a new selection; wrappers inherit like shims.
+        let env = if from_wrapper {
+            ToolPathEnv::from_env()
+        } else {
+            ToolPathEnv::new(std::env::var_os("PATH").unwrap_or_default(), "")
+        };
         let args: Vec<String> = command[1..].to_vec();
         // stdout belongs to the dispatched tool; route vp's own output to stderr.
         vp_shared::output::route_user_output_to_stderr();
-        let exit_code = shim_dispatch(tool, &args).await;
+        let exit_code = shim_dispatch(tool, &args, env).await;
         return Ok(exit_status(exit_code));
     }
 

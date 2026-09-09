@@ -677,8 +677,8 @@ async fn resolve_package_manager_tool(
 async fn prepare_js_child_path(
     cwd: &AbsolutePath,
     node_bin_dir: &AbsolutePath,
+    mut env: ToolPathEnv,
 ) -> Result<ToolPathEnv, Error> {
-    let mut env = ToolPathEnv::from_env();
     env.prepend(node_bin_dir, &["node"], PrependOptions::default())?;
     if let Some(npm_path) = resolve_package_manager_tool(cwd, "npm").await? {
         if let Some(bin_dir) = npm_path.parent() {
@@ -703,8 +703,9 @@ async fn prepare_js_child_path(
 /// Main shim dispatch entry point.
 ///
 /// Called when the binary is invoked as a core shim or package binary.
+/// The caller supplies the tool selections eligible for inheritance.
 /// Returns an exit code to be used with std::process::exit.
-pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
+pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     tracing::debug!("dispatch: tool: {tool}, args: {:?}", args);
 
     // Handle vpx — standalone command, doesn't need recursion/bypass/shim-mode checks
@@ -732,17 +733,17 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     }
 
     // A child may replace PATH while retaining the injection marker.
-    if ToolPathEnv::from_env().contains(tool)
+    if env.contains(tool)
         && let Some(system_path) = find_system_tool(tool)
     {
         tracing::debug!("tool path already injected: {tool}");
-        return exec::exec_tool(&system_path, args, ToolPathEnv::from_env());
+        return exec::exec_tool(&system_path, args, env);
     }
 
     // Check bypass mode (explicit environment variable)
     if std::env::var(env_vars::VP_BYPASS).is_ok() {
         tracing::debug!("bypass mode enabled");
-        return bypass_to_system(tool, args);
+        return bypass_to_system(tool, args, env);
     }
 
     // Check shim mode from config
@@ -752,7 +753,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
         // In system-first mode, try to find system tool first
         if let Some(system_path) = find_system_tool(tool) {
             let child_env = if PackageManagerType::from_tool(tool).is_some() {
-                match prepare_node_path_for_system_package_manager().await {
+                match prepare_node_path_for_system_package_manager(env).await {
                     Ok(env) => env,
                     Err(error) => {
                         eprintln!(
@@ -762,7 +763,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
                     }
                 }
             } else {
-                ToolPathEnv::from_env()
+                env
             };
             // Append current bin_dir to VP_BYPASS to prevent infinite loops
             // when multiple vite-plus installations exist in PATH.
@@ -789,7 +790,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     // Package binaries use their install-time Node.js version; core shims use
     // the project-resolved runtime below.
     if !is_core_shim_tool(tool) {
-        return dispatch_package_binary(tool, args).await;
+        return dispatch_package_binary(tool, args, env).await;
     }
 
     // Get current working directory
@@ -804,7 +805,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     // Ensure Node.js is installed and locate its binary for PATH preparation.
     // Package-manager shims can use their own declared version, but JS-based
     // package managers still need the Node.js runtime selected by its mode.
-    let system_node = if ToolPathEnv::from_env().contains("node") {
+    let system_node = if env.contains("node") {
         find_system_tool("node")
     } else if PackageManagerType::from_tool(tool).is_some() {
         match config::load_config().await {
@@ -876,7 +877,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     // bin dir available for JS package-manager shims, and put a separately
     // installed PM bin dir first so nested invocations see the same PM version.
     let node_bin_dir = node_path.parent().expect("Node has no parent directory");
-    let mut child_env = match prepare_js_child_path(&cwd, node_bin_dir).await {
+    let mut child_env = match prepare_js_child_path(&cwd, node_bin_dir, env).await {
         Ok(env) => env,
         Err(error) => {
             eprintln!("vp: Failed to prepare child process PATH: {error}");
@@ -963,8 +964,12 @@ fn read_node_version(node_path: &AbsolutePath) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().trim_start_matches('v').to_string())
 }
 
-async fn prepare_node_path_for_system_package_manager() -> Result<ToolPathEnv, Error> {
-    let mut env = ToolPathEnv::from_env();
+async fn prepare_node_path_for_system_package_manager(
+    mut env: ToolPathEnv,
+) -> Result<ToolPathEnv, Error> {
+    if env.contains("node") && find_system_tool("node").is_some() {
+        return Ok(env);
+    }
     let config = config::load_config().await?;
     if config.node_shim_mode == ShimMode::SystemFirst
         && let Some(node) = find_system_tool("node")
@@ -988,7 +993,7 @@ async fn prepare_node_path_for_system_package_manager() -> Result<ToolPathEnv, E
 ///
 /// Finds the package that provides this binary and executes it with the
 /// Node.js version that was used to install the package.
-async fn dispatch_package_binary(tool: &str, args: &[String]) -> i32 {
+async fn dispatch_package_binary(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     // Find which package provides this binary
     let package_metadata = match find_package_for_binary(tool).await {
         Ok(Some(metadata)) => metadata,
@@ -1003,16 +1008,20 @@ async fn dispatch_package_binary(tool: &str, args: &[String]) -> i32 {
         }
     };
 
-    let (program, mut full_args, child_env) =
-        match package_binary_invocation(&package_metadata, tool, &package_metadata.platform.node)
-            .await
-        {
-            Ok(invocation) => invocation,
-            Err(e) => {
-                eprintln!("vp: {e}");
-                return 1;
-            }
-        };
+    let (program, mut full_args, child_env) = match package_binary_invocation(
+        &package_metadata,
+        tool,
+        &package_metadata.platform.node,
+        env,
+    )
+    .await
+    {
+        Ok(invocation) => invocation,
+        Err(e) => {
+            eprintln!("vp: {e}");
+            return 1;
+        }
+    };
     // Native binaries have no leading args; exec with the caller's slice
     // instead of cloning every argument.
     if full_args.is_empty() {
@@ -1030,6 +1039,7 @@ pub(crate) async fn package_binary_invocation(
     metadata: &PackageMetadata,
     tool: &str,
     node_version: &str,
+    mut env: ToolPathEnv,
 ) -> Result<(AbsolutePathBuf, Vec<String>, ToolPathEnv), String> {
     let node_path = ensure_installed(node_version)
         .await
@@ -1043,9 +1053,8 @@ pub(crate) async fn package_binary_invocation(
     let node_bin_dir =
         node_path.parent().ok_or_else(|| "Node has no parent directory".to_string())?;
     let child_env = if let Ok(cwd) = current_dir() {
-        prepare_js_child_path(&cwd, node_bin_dir).await.map_err(|error| error.to_string())?
+        prepare_js_child_path(&cwd, node_bin_dir, env).await.map_err(|error| error.to_string())?
     } else {
-        let mut env = ToolPathEnv::from_env();
         env.prepend(node_bin_dir, &["node"], PrependOptions::default())
             .map_err(|error| error.to_string())?;
         env
@@ -1135,9 +1144,9 @@ pub(crate) fn locate_package_binary(
 }
 
 /// Bypass shim and use system tool.
-fn bypass_to_system(tool: &str, args: &[String]) -> i32 {
+fn bypass_to_system(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     match find_system_tool(tool) {
-        Some(system_path) => exec::exec_tool(&system_path, args, ToolPathEnv::from_env()),
+        Some(system_path) => exec::exec_tool(&system_path, args, env),
         None => {
             eprintln!("vp: VP_BYPASS is set but no system '{tool}' found in PATH");
             1
