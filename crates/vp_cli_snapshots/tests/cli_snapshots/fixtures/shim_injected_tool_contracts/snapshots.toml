@@ -130,6 +130,15 @@ steps = [
 ]
 
 [[case]]
+name = "bundled_npm_ignores_uninherited_system_runtime"
+vp = "global"
+skip-platforms = ["windows"]
+steps = [
+  { argv = ["vp", "env", "on", "npm"], snapshot = false },
+  { argv = ["vp", "env", "exec", "--node", "20.18.0", "node", "assert-unix-shim-path.cjs", "system"], comment = "Uninherited npm/npx come from the selected Node, even with another runtime on PATH" },
+]
+
+[[case]]
 name = "explicit_npm_after_partial_path_reset"
 vp = "global"
 skip-platforms = ["windows"]

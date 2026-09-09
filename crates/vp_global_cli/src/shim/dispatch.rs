@@ -852,17 +852,13 @@ pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     // fallback. Node and bundled npm tools come from the selected Node.js runtime.
     let tool_path = match resolve_package_manager_tool(&cwd, tool).await {
         Ok(Some(path)) => path,
-        Ok(None) => {
-            let inherited_tool = resolution.is_none().then(|| find_system_tool(tool)).flatten();
-            let path = inherited_tool.map_or_else(|| locate_tool(&node_path, tool), Ok);
-            match path {
-                Ok(path) => path,
-                Err(error) => {
-                    eprintln!("vp: Tool '{tool}' not found: {error}");
-                    return 1;
-                }
+        Ok(None) => match locate_tool(&node_path, tool) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("vp: Tool '{tool}' not found: {error}");
+                return 1;
             }
-        }
+        },
         Err(e) => {
             eprintln!("vp: Failed to resolve package manager for '{tool}': {e}");
             return 1;
