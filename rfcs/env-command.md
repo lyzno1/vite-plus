@@ -1914,7 +1914,7 @@ When `--node` is **not provided** and the first command is a shim tool:
 
 Both use the **exact same code path** as Unix symlinks (`shim::dispatch()`), ensuring identical behavior across platforms. On Windows, trampoline `.exe` shims set `VP_SHIM_TOOL` to enter shim dispatch mode.
 
-`VP_PATH_INJECTED_TOOLS` is preserved through shim dispatch. Only tools whose real binary directories have already been injected use PATH passthrough.
+`VP_PATH_INJECTED_TOOLS` is preserved through shim dispatch. Marked tools use PATH passthrough only when a real executable remains available, excluding Vite+ trampolines from any installation. If a child replaces PATH and removes that executable, normal tool resolution resumes.
 
 ### Explicit Version Mode Behavior
 

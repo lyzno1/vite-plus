@@ -40,3 +40,17 @@ steps = [
   { tty = false, argv = ["vp", "env", "exec", "--node", "22.18.0", "--npm", "10.5.0", "npm", "--version"], snapshot = false },
   { tty = false, argv = ["vp", "env", "exec", "--node", "22.18.0", "--npm", "10.5.0", "vp", "create"], comment = "Entering the JS CLI must retain the explicitly selected npm ahead of bundled npm" },
 ]
+
+[[case]]
+name = "inherited_marker_after_path_reset"
+vp = "global"
+steps = [
+  { argv = ["vp", "env", "exec", "--node", "22.18.0", "node", "assert-inherited-path.cjs", "reset"], comment = "A retained marker must allow normal resolution after a child removes the injected Node directory" },
+]
+
+[[case]]
+name = "inherited_marker_skips_other_trampoline"
+vp = "global"
+steps = [
+  { argv = ["vp", "env", "exec", "--node", "22.18.0", "node", "assert-inherited-path.cjs", "trampoline"], comment = "A trampoline from another installation must not be mistaken for the injected Node" },
+]

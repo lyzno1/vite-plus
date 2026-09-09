@@ -26,7 +26,7 @@ mod tracing;
 
 pub use dirs::{
     SHIM_POINTER_EXTENSION, SHIM_POINTER_HEADER, VP_BINARY_NAME, VpDirEnvError, VpDirs,
-    VpDirsLayout, shim_pointer_file_name, validate_vp_dir_env,
+    VpDirsLayout, is_windows_trampoline, shim_pointer_file_name, validate_vp_dir_env,
 };
 pub use env_config::EnvConfig;
 pub use error::format_error_chain;

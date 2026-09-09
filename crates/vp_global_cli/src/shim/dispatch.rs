@@ -731,9 +731,12 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
         return crate::commands::vpr::execute_vpr(args, &cwd).await;
     }
 
-    if ToolPathEnv::from_env().contains(tool) {
+    // A child may replace PATH while retaining the injection marker.
+    if ToolPathEnv::from_env().contains(tool)
+        && let Some(system_path) = find_system_tool(tool)
+    {
         tracing::debug!("tool path already injected: {tool}");
-        return passthrough_to_system(tool, args);
+        return exec::exec_tool(&system_path, args, ToolPathEnv::from_env());
     }
 
     // Check bypass mode (explicit environment variable)
@@ -1142,17 +1145,6 @@ fn bypass_to_system(tool: &str, args: &[String]) -> i32 {
     }
 }
 
-/// Reuse an injected tool through PATH, excluding vp shims to avoid a loop.
-fn passthrough_to_system(tool: &str, args: &[String]) -> i32 {
-    match find_system_tool(tool) {
-        Some(system_path) => exec::exec_tool(&system_path, args, ToolPathEnv::from_env()),
-        None => {
-            eprintln!("vp: Injected tool '{tool}' not found in PATH (excluding shims)");
-            1
-        }
-    }
-}
-
 /// Resolve version with caching.
 pub(crate) async fn resolve_with_cache(cwd: &AbsolutePathBuf) -> Result<ResolveCacheEntry, String> {
     // Fast-path: VP_NODE_VERSION env var set by `vp env use`
@@ -1441,19 +1433,16 @@ fn find_system_tool_in(tool: &str, cwd: &AbsolutePath) -> Option<AbsolutePathBuf
         .map(|p| if p.is_absolute() || p.starts_with("~") { p } else { cwd.as_path().join(p) })
         .collect();
 
-    // Never return the running executable itself: with a misconfigured bin
-    // dir (e.g. VP_HOME overridden) the invoked shim can still live on PATH,
-    // and returning it would make the shim exec itself in an infinite loop.
-    // Compare canonical identities (symlinks defeat path comparison, and
-    // `current_exe` is fully resolved on Linux), then skip the self
-    // candidate's directory and keep searching so a real system tool later
-    // in PATH is still found.
+    // Exclude both our executable (including symlinks) and trampolines owned
+    // by other installations, which would otherwise dispatch back into vp.
     let self_real = std::env::current_exe().ok().and_then(|exe| exe.canonicalize().ok());
     loop {
         // Use vp_command::resolve_bin with filtered PATH - stops at first match
         let search_path = std::env::join_paths(&filtered_paths).ok()?;
         let resolved = vp_command::resolve_bin(tool, Some(&search_path), cwd).ok()?;
-        if self_real.is_none() || resolved.as_path().canonicalize().ok() != self_real {
+        if !vp_shared::is_windows_trampoline(resolved.as_path())
+            && (self_real.is_none() || resolved.as_path().canonicalize().ok() != self_real)
+        {
             return Some(resolved);
         }
         // Canonicalize both sides of the comparison so symlink-aliased PATH
@@ -1606,6 +1595,39 @@ mod tests {
             assert!(result.is_some(), "Should find tool when no bypass is set");
             assert!(result.unwrap().as_path().starts_with(&dir));
         });
+    }
+
+    #[test]
+    fn test_find_system_tool_skips_other_installation_trampolines() {
+        let temp = TempDir::new().unwrap();
+        let dirs = ["install_a", "install_b", "real"].map(|name| temp.path().join(name));
+        for (index, dir) in dirs.iter().enumerate() {
+            std::fs::create_dir_all(dir).unwrap();
+            let exe = create_fake_executable(dir, "node");
+            if index < 2 {
+                std::fs::write(
+                    exe.with_extension(vp_shared::SHIM_POINTER_EXTENSION),
+                    format!(
+                        "{}\nlayout=single-root\ndata={}\n",
+                        vp_shared::SHIM_POINTER_HEADER,
+                        dir.display()
+                    ),
+                )
+                .unwrap();
+            }
+        }
+        let path = std::env::join_paths(&dirs).unwrap();
+        temp_env::with_vars(
+            [("PATH", Some(path.as_os_str())), (env_vars::VP_BYPASS, None)],
+            || {
+                assert!(find_system_tool("node").unwrap().as_path().starts_with(&dirs[2]));
+            },
+        );
+        let path = std::env::join_paths(&dirs[..2]).unwrap();
+        temp_env::with_vars(
+            [("PATH", Some(path.as_os_str())), (env_vars::VP_BYPASS, None)],
+            || assert!(find_system_tool("node").is_none()),
+        );
     }
 
     #[test]
