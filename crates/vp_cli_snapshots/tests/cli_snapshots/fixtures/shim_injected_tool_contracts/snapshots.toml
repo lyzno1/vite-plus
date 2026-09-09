@@ -139,6 +139,18 @@ steps = [
 ]
 
 [[case]]
+name = "bundled_npm_through_system_node_shim"
+vp = "global"
+skip-platforms = ["windows"]
+steps = [
+  { argv = ["vpt", "write-file", ".node-version", "20.18.0"], snapshot = false },
+  { argv = ["vp", "env", "exec", "--node", "22.18.0", "node", "assert-system-node-shim.cjs", "setup"], snapshot = false },
+  { argv = ["vp", "env", "off", "node"], snapshot = false },
+  { argv = ["vp", "env", "on", "npm"], snapshot = false },
+  { argv = ["node", "assert-system-node-shim.cjs"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-shims${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin"]], comment = "Bundled npm/npx and their children use Node 22 behind the system shim despite the project's Node 20 pin" },
+]
+
+[[case]]
 name = "explicit_npm_after_partial_path_reset"
 vp = "global"
 skip-platforms = ["windows"]

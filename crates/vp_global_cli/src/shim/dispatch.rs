@@ -835,7 +835,7 @@ pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     } else {
         None
     };
-    let node_path = if let Some(system_node) = system_node {
+    let mut node_path = if let Some(system_node) = system_node {
         system_node
     } else {
         let resolution = resolution.as_ref().expect("managed Node.js has no resolution");
@@ -852,8 +852,11 @@ pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     // fallback. Node and bundled npm tools come from the selected Node.js runtime.
     let tool_path = match resolve_package_manager_tool(&cwd, tool).await {
         Ok(Some(path)) => path,
-        Ok(None) => match locate_tool(&node_path, tool) {
-            Ok(path) => path,
+        Ok(None) => match resolve_bundled_tool(node_path, tool, resolution.is_none()) {
+            Ok((runtime_path, tool_path)) => {
+                node_path = runtime_path;
+                tool_path
+            }
             Err(error) => {
                 eprintln!("vp: Tool '{tool}' not found: {error}");
                 return 1;
@@ -1288,10 +1291,27 @@ pub(crate) async fn ensure_installed(version: &str) -> Result<AbsolutePathBuf, S
     Ok(binary_path)
 }
 
-/// Locate a bundled tool beside the selected Node executable, following Node symlinks.
-fn locate_tool(node_path: &AbsolutePath, tool: &str) -> Result<AbsolutePathBuf, String> {
+/// Resolve the runtime and its bundled tool, including Node launched through external shims.
+fn resolve_bundled_tool(
+    mut node_path: AbsolutePathBuf,
+    tool: &str,
+    external_node: bool,
+) -> Result<(AbsolutePathBuf, AbsolutePathBuf), String> {
     if tool == "node" {
-        return Ok(node_path.to_absolute_path_buf());
+        return Ok((node_path.clone(), node_path));
+    }
+    if external_node {
+        // A version-manager shim may resolve to the manager binary rather than Node.
+        let output = std::process::Command::new(node_path.as_path())
+            .args(["-p", "process.execPath"])
+            .output()
+            .map_err(|error| format!("Failed to query Node executable: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("Failed to query Node executable: {}", output.status));
+        }
+        let executable = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+        node_path = AbsolutePathBuf::new(executable.trim().into())
+            .ok_or_else(|| format!("Invalid Node executable path: {}", executable.trim()))?;
     }
     // The resolved directory enters PATH and must also work with Windows .cmd scripts.
     let node_path = dunce::canonicalize(node_path).map_err(|error| error.to_string())?;
@@ -1308,7 +1328,7 @@ fn locate_tool(node_path: &AbsolutePath, tool: &str) -> Result<AbsolutePathBuf, 
         return Err(format!("Tool '{}' not found at {}", tool, tool_path.as_path().display()));
     }
 
-    Ok(tool_path)
+    Ok((node_path, tool_path))
 }
 
 /// Load shim mode from config.
