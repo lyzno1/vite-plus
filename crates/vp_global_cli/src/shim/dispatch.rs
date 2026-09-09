@@ -1474,13 +1474,11 @@ fn find_system_tool_in(tool: &str, cwd: &AbsolutePath) -> Option<AbsolutePathBuf
         let search_path = std::env::join_paths(&filtered_paths).ok()?;
         let resolved = vp_command::resolve_bin(tool, Some(&search_path), cwd).ok()?;
         let canonical = resolved.as_path().canonicalize().ok();
+        // A sibling `vp` may itself be a shim sharing an external manager's executable.
         let is_unix_shim = cfg!(unix)
-            && canonical.as_ref().is_some_and(|target| {
-                target.file_name().is_some_and(|name| name == "vp")
-                    || resolved.parent().is_some_and(|dir| {
-                        dir.join("vp").as_path().canonicalize().ok().as_ref() == Some(target)
-                    })
-            });
+            && canonical
+                .as_ref()
+                .is_some_and(|target| target.file_name().is_some_and(|name| name == "vp"));
         if !vp_shared::is_windows_trampoline(resolved.as_path())
             && !is_unix_shim
             && (self_real.is_none() || canonical != self_real)
@@ -1674,7 +1672,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_find_system_tool_skips_other_installation_symlinks() {
+    fn test_find_system_tool_distinguishes_vp_from_shared_manager_shims() {
         let temp = TempDir::new().unwrap();
         let dirs = ["install", "aliases", "real"].map(|name| temp.path().join(name));
         for dir in &dirs {
@@ -1689,14 +1687,14 @@ mod tests {
             || assert!(find_system_tool("node").unwrap().as_path().starts_with(&dirs[2])),
         );
 
-        let renamed = create_fake_executable(&dirs[0], "renamed-vp");
+        let manager = create_fake_executable(&dirs[0], "tool-manager");
         std::fs::remove_file(&vp).unwrap();
-        std::os::unix::fs::symlink(&renamed, &vp).unwrap();
-        std::os::unix::fs::symlink(&renamed, dirs[0].join("node")).unwrap();
+        std::os::unix::fs::symlink(&manager, &vp).unwrap();
+        std::os::unix::fs::symlink(&manager, dirs[0].join("node")).unwrap();
         let path = std::env::join_paths([&dirs[0], &dirs[2]]).unwrap();
         temp_env::with_vars(
             [("PATH", Some(path.as_os_str())), (env_vars::VP_BYPASS, None)],
-            || assert!(find_system_tool("node").unwrap().as_path().starts_with(&dirs[2])),
+            || assert_eq!(find_system_tool("node").unwrap().as_path(), dirs[0].join("node")),
         );
     }
 

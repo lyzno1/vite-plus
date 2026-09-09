@@ -13,11 +13,15 @@ if (process.argv[2] === 'setup') {
     `#!/bin/sh\nexec '${runtime}/'"\${0##*/}" "$@"\n`,
     { mode: 0o755 },
   );
-  for (const tool of ['node', 'npm', 'npx']) {
+  for (const tool of ['vp', 'node', 'npm', 'npx']) {
     symlinkSync('../manager/tool-manager', `system-shims/${tool}`);
   }
 } else {
   assert.equal(process.env.VP_BYPASS, undefined);
+  assert.equal(
+    execFileSync('node', ['--version'], { encoding: 'utf8', timeout: 10000 }).trim(),
+    process.version,
+  );
   const preload = process.argv[2] === 'preload';
   const options = {
     encoding: 'utf8',
