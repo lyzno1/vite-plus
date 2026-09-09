@@ -851,10 +851,8 @@ pub async fn dispatch(tool: &str, args: &[String], env: ToolPathEnv) -> i32 {
     let tool_path = match resolve_package_manager_tool(&cwd, tool).await {
         Ok(Some(path)) => path,
         Ok(None) => {
-            let path = match resolution.as_ref() {
-                Some(resolution) => locate_tool(&resolution.version, tool),
-                None => find_system_tool(tool).ok_or_else(|| format!("system '{tool}' not found")),
-            };
+            let inherited_tool = resolution.is_none().then(|| find_system_tool(tool)).flatten();
+            let path = inherited_tool.map_or_else(|| locate_tool(&node_path, tool), Ok);
             match path {
                 Ok(path) => path,
                 Err(error) => {
@@ -1287,20 +1285,20 @@ pub(crate) async fn ensure_installed(version: &str) -> Result<AbsolutePathBuf, S
     Ok(binary_path)
 }
 
-/// Locate a tool binary within the Node.js installation.
-pub(crate) fn locate_tool(version: &str, tool: &str) -> Result<AbsolutePathBuf, String> {
-    let home_dir = node_install_dir(version);
+/// Locate a bundled tool beside the selected Node executable, following Node symlinks.
+fn locate_tool(node_path: &AbsolutePath, tool: &str) -> Result<AbsolutePathBuf, String> {
+    if tool == "node" {
+        return Ok(node_path.to_absolute_path_buf());
+    }
+    let node_path = node_path.as_path().canonicalize().map_err(|error| error.to_string())?;
+    let node_path = AbsolutePathBuf::new(node_path).expect("canonical Node path must be absolute");
+    let bin_dir = node_path.parent().ok_or_else(|| "Node has no bin directory".to_string())?;
 
     #[cfg(windows)]
-    let tool_path = if tool == "node" {
-        home_dir.join("node.exe")
-    } else {
-        // npm and npx are .cmd scripts on Windows
-        home_dir.join(format!("{tool}.cmd"))
-    };
+    let tool_path = bin_dir.join(format!("{tool}.cmd"));
 
     #[cfg(not(windows))]
-    let tool_path = home_dir.join("bin").join(tool);
+    let tool_path = bin_dir.join(tool);
 
     if !tool_path.as_path().exists() {
         return Err(format!("Tool '{}' not found at {}", tool, tool_path.as_path().display()));
@@ -1442,15 +1440,24 @@ fn find_system_tool_in(tool: &str, cwd: &AbsolutePath) -> Option<AbsolutePathBuf
         .map(|p| if p.is_absolute() || p.starts_with("~") { p } else { cwd.as_path().join(p) })
         .collect();
 
-    // Exclude both our executable (including symlinks) and trampolines owned
-    // by other installations, which would otherwise dispatch back into vp.
+    // Exclude our executable and shims from other installations, which would
+    // otherwise dispatch back into vp.
     let self_real = std::env::current_exe().ok().and_then(|exe| exe.canonicalize().ok());
     loop {
         // Use vp_command::resolve_bin with filtered PATH - stops at first match
         let search_path = std::env::join_paths(&filtered_paths).ok()?;
         let resolved = vp_command::resolve_bin(tool, Some(&search_path), cwd).ok()?;
+        let canonical = resolved.as_path().canonicalize().ok();
+        let is_unix_shim = cfg!(unix)
+            && canonical.as_ref().is_some_and(|target| {
+                target.file_name().is_some_and(|name| name == "vp")
+                    || resolved.parent().is_some_and(|dir| {
+                        dir.join("vp").as_path().canonicalize().ok().as_ref() == Some(target)
+                    })
+            });
         if !vp_shared::is_windows_trampoline(resolved.as_path())
-            && (self_real.is_none() || resolved.as_path().canonicalize().ok() != self_real)
+            && !is_unix_shim
+            && (self_real.is_none() || canonical != self_real)
         {
             return Some(resolved);
         }
@@ -1636,6 +1643,34 @@ mod tests {
         temp_env::with_vars(
             [("PATH", Some(path.as_os_str())), (env_vars::VP_BYPASS, None)],
             || assert!(find_system_tool("node").is_none()),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_system_tool_skips_other_installation_symlinks() {
+        let temp = TempDir::new().unwrap();
+        let dirs = ["install", "aliases", "real"].map(|name| temp.path().join(name));
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let vp = create_fake_executable(&dirs[0], "vp");
+        std::os::unix::fs::symlink(&vp, dirs[1].join("node")).unwrap();
+        create_fake_executable(&dirs[2], "node");
+        let path = std::env::join_paths([&dirs[1], &dirs[2]]).unwrap();
+        temp_env::with_vars(
+            [("PATH", Some(path.as_os_str())), (env_vars::VP_BYPASS, None)],
+            || assert!(find_system_tool("node").unwrap().as_path().starts_with(&dirs[2])),
+        );
+
+        let renamed = create_fake_executable(&dirs[0], "renamed-vp");
+        std::fs::remove_file(&vp).unwrap();
+        std::os::unix::fs::symlink(&renamed, &vp).unwrap();
+        std::os::unix::fs::symlink(&renamed, dirs[0].join("node")).unwrap();
+        let path = std::env::join_paths([&dirs[0], &dirs[2]]).unwrap();
+        temp_env::with_vars(
+            [("PATH", Some(path.as_os_str())), (env_vars::VP_BYPASS, None)],
+            || assert!(find_system_tool("node").unwrap().as_path().starts_with(&dirs[2])),
         );
     }
 
