@@ -11,7 +11,7 @@ use std::process::ExitStatus;
 
 use vp_js_runtime::NodeProvider;
 use vp_pm_cli::{download_package_manager, resolve_package_manager_version};
-use vp_shared::env_vars;
+use vp_shared::{PrependOptions, ToolPathEnv, env_vars};
 use vt_path::AbsolutePath;
 
 use super::{
@@ -62,22 +62,11 @@ pub async fn execute(
     // - Globally installed package binaries (tsc, eslint, etc.)
     let tool = &command[0];
     if is_shim_tool(tool) {
-        // Clear recursion env var to force fresh version resolution.
-        // This is needed because `vp env exec` may be invoked from within a context
-        // where VP_TOOL_RECURSION is already set (e.g., when pnpm runs through
-        // the vite-plus shim). Without clearing it, shim_dispatch would passthrough
-        // to the system node instead of resolving the version.
-        // SAFETY: This is safe because we're about to spawn a child process and we want
-        // fresh version resolution, not passthrough behavior.
-        unsafe {
-            std::env::remove_var(env_vars::VP_TOOL_RECURSION);
-        }
-
         // Use the SAME shim dispatch as Unix symlinks - this ensures:
         // - Core tools: Version resolved from .node-version/package.json/default
         // - Package binaries: Uses Node.js version from package metadata
         // - Automatic Node.js download if needed
-        // - Recursion prevention via VP_TOOL_RECURSION
+        // - Reuse of tools already injected into PATH
         // - Shim mode checking (managed vs system-first)
         let args: Vec<String> = command[1..].to_vec();
         // stdout belongs to the dispatched tool; route vp's own output to stderr.
@@ -146,12 +135,13 @@ async fn execute_with_version(
         (config::resolve_version(cwd).await?.version, None)
     };
     if let Some(bin_dir) = system_node_bin {
-        path_prefixes.push(bin_dir.into_path_buf());
+        path_prefixes.push((bin_dir.into_path_buf(), vec!["node"]));
     } else {
         let runtime =
             vp_js_runtime::download_runtime(vp_js_runtime::JsRuntimeType::Node, &resolved_node)
                 .await?;
-        path_prefixes.push(runtime.get_bin_prefix().as_path().to_path_buf());
+        path_prefixes
+            .push((runtime.get_bin_prefix().as_path().to_path_buf(), vec!["node", "npm", "npx"]));
     }
     let explicit_package_manager = package_manager.is_some();
     let mut system_package_manager = None;
@@ -170,7 +160,17 @@ async fn execute_with_version(
         {
             let system_version =
                 read_tool_version(&path).await.unwrap_or_else(|| selected.version.to_string());
-            path_prefixes.insert(0, bin_dir.as_path().to_path_buf());
+            path_prefixes.insert(
+                0,
+                (
+                    bin_dir.as_path().to_path_buf(),
+                    vec![
+                        selected
+                            .package_manager_type
+                            .bin_name_for_tool(&selected.package_manager_type.to_string()),
+                    ],
+                ),
+            );
             system_package_manager =
                 Some(format!("{}@{system_version}", selected.package_manager_type));
             None
@@ -193,36 +193,32 @@ async fn execute_with_version(
             && let Some(bin_dir) = path.parent()
         {
             let system_version = read_tool_version(&path).await.unwrap_or(version);
-            path_prefixes.insert(0, bin_dir.as_path().to_path_buf());
+            path_prefixes.insert(
+                0,
+                (bin_dir.as_path().to_path_buf(), vec![kind.bin_name_for_tool(&kind.to_string())]),
+            );
             Some(format!("{kind}@{system_version}"))
         } else {
             let (install_dir, _, _) =
                 download_package_manager(kind, &version, hash.as_deref()).await?;
-            path_prefixes.insert(0, install_dir.join("bin").into_path_buf());
+            path_prefixes
+                .insert(0, (install_dir.join("bin").into_path_buf(), kind.bin_names().to_vec()));
             Some(format!("{kind}@{version}"))
         }
     } else {
         None
     };
 
-    // 3. Clear recursion env var to force re-evaluation in child processes
-    // SAFETY: This is safe because we're about to spawn a child process and we want
-    // to ensure the env var is not inherited. We're not reading this env var in other
-    // threads at this point.
-    unsafe {
-        std::env::remove_var(env_vars::VP_TOOL_RECURSION);
+    let mut child_env = ToolPathEnv::from_env();
+    for (dir, tools) in path_prefixes.into_iter().rev() {
+        child_env.prepend(dir, &tools, PrependOptions::default())?;
     }
-
-    let mut paths = path_prefixes;
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
-    let new_path = std::env::join_paths(paths)
-        .map_err(|error| Error::Other(format!("failed to construct PATH: {error}").into()))?;
 
     // 5. Execute command
     let (cmd, args) = command.split_first().unwrap();
 
     let mut child = tokio::process::Command::new(cmd);
-    child.args(args).env("PATH", new_path).env(env_vars::VP_NODE_VERSION, &resolved_node);
+    child.args(args).envs(child_env.into_envs()).env(env_vars::VP_NODE_VERSION, &resolved_node);
     if let Some(package_manager) = resolved_package_manager {
         child.env(env_vars::VP_PACKAGE_MANAGER, package_manager);
     }

@@ -40,8 +40,8 @@ pub use package_json::{
     DevEngineDependency, DevEngineField, DevEngines, Engines, OnFail, PackageJson, dev_engine_entry,
 };
 pub use path_env::{
-    PrependOptions, PrependResult, format_path_prepended, format_path_with_prepend,
-    prepend_to_path_env,
+    PrependOptions, PrependResult, ToolPathEnv, format_path_prepended, format_path_with_prepend,
+    prepend_to_path_env, prepend_tools_to_path_env,
 };
 pub use process::exit_code_from_status;
 pub use stdio::ensure_blocking_stdio;

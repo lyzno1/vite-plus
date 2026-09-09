@@ -24,6 +24,14 @@ npm lifecycle scripts can invoke the project pnpm
 10.19.0
 ```
 
+## `npx --offline --call 'pnpm exec node assert-injected-tools.cjs pnpm 10.19.0 20.18.0'`
+
+Injected tools accumulate and an explicit shim invocation reuses them
+
+```
+Injected pnpm resolves to 10.19.0 on Node <version>
+```
+
 ## `pnpm exec pnpm --version`
 
 Same-family child calls still reach the real binary

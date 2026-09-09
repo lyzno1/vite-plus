@@ -1,0 +1,42 @@
+[[case]]
+name = "global_package_keeps_its_node_after_npx"
+vp = "global"
+steps = [
+  { argv = ["vp", "install", "-g", "--node", "22.18.0", "./runtime-probe"], snapshot = false },
+  { argv = ["npx", "--offline", "--call", "injected-runtime-probe"], comment = "Inherited bundled npm must not replace the global package's selected Node" },
+]
+
+[[case]]
+name = "global_package_keeps_independent_npm_pin"
+vp = "global"
+steps = [
+  { argv = ["vpt", "json-edit", "package.json", "packageManager", "npm@10.5.0"], snapshot = false },
+  { argv = ["vp", "env", "on", "npm"], snapshot = false },
+  { argv = ["vp", "install", "-g", "--node", "22.18.0", "./runtime-probe"], snapshot = false },
+  { argv = ["npx", "--version"], snapshot = false },
+  { argv = ["npx", "--offline", "--call", "injected-runtime-probe 10.5.0"], comment = "A separately pinned npm keeps precedence over the selected Node's bundled npm" },
+]
+
+[[case]]
+name = "system_npm_does_not_claim_missing_npx"
+vp = "global"
+skip-platforms = ["windows"]
+steps = [
+  { argv = ["vpt", "json-edit", "package.json", "packageManager", "npm@10.5.0"], snapshot = false },
+  { argv = ["vp", "env", "on", "npm"], snapshot = false },
+  { argv = ["npm", "--version"], snapshot = false },
+  { argv = ["node", "setup-system-npm.cjs"], snapshot = false },
+  { argv = ["vp", "env", "off", "npm"], snapshot = false },
+  { argv = ["vp", "env", "off", "node"], snapshot = false },
+  { argv = ["vp", "install"], envs = [["PATH", "${VP_HOME}/bin${PATH_SEPARATOR}${workspace}/system-npm${PATH_SEPARATOR}/usr/bin${PATH_SEPARATOR}/bin"]], comment = "An absent system alias resolves normally instead of entering injected-tool passthrough" },
+]
+
+[[case]]
+name = "js_delegation_preserves_explicit_npm"
+vp = "global"
+steps = [
+  { argv = ["vpt", "mkdir", "-p", "node_modules"], snapshot = false },
+  { argv = ["vpt", "cp", "-r", "js-cli", "node_modules/vite-plus"], snapshot = false },
+  { tty = false, argv = ["vp", "env", "exec", "--node", "22.18.0", "--npm", "10.5.0", "npm", "--version"], snapshot = false },
+  { tty = false, argv = ["vp", "env", "exec", "--node", "22.18.0", "--npm", "10.5.0", "vp", "create"], comment = "Entering the JS CLI must retain the explicitly selected npm ahead of bundled npm" },
+]

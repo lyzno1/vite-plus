@@ -7,7 +7,7 @@
 
 use dialoguer::{Select, theme::ColorfulTheme};
 use vp_pm_cli::{PackageManagerType, ensure_package_manager_bin};
-use vp_shared::{PrependOptions, env_vars, output, prepend_to_path_env};
+use vp_shared::{PrependOptions, ToolPathEnv, env_vars, output};
 use vt_path::{AbsolutePath, AbsolutePathBuf, current_dir};
 
 use super::{
@@ -26,12 +26,6 @@ use crate::{
     },
     error::Error,
 };
-
-/// Environment variable used to prevent infinite recursion in shim dispatch.
-///
-/// When set, the shim will skip version resolution and execute the tool
-/// directly using the current PATH (passthrough mode).
-const RECURSION_ENV_VAR: &str = env_vars::VP_TOOL_RECURSION;
 
 /// Parsed npm global command (install or uninstall).
 struct NpmGlobalCommand {
@@ -183,11 +177,17 @@ fn resolve_package_name(spec: &str) -> Option<String> {
 ///
 /// Runs `npm config get prefix` to determine the global prefix, which respects
 /// `NPM_CONFIG_PREFIX` env var and `.npmrc` settings. Falls back to `node_dir`.
-fn get_npm_global_prefix(npm_path: &AbsolutePath, node_dir: &AbsolutePathBuf) -> AbsolutePathBuf {
+fn get_npm_global_prefix(
+    npm_path: &AbsolutePath,
+    node_dir: &AbsolutePathBuf,
+    env: &ToolPathEnv,
+) -> AbsolutePathBuf {
     // `npm config get prefix` respects NPM_CONFIG_PREFIX, .npmrc, and other
     // npm config mechanisms.
-    if let Ok(output) =
-        std::process::Command::new(npm_path.as_path()).args(["config", "get", "prefix"]).output()
+    if let Ok(output) = std::process::Command::new(npm_path.as_path())
+        .args(["config", "get", "prefix"])
+        .envs(env.clone().into_envs())
+        .output()
     {
         if output.status.success() {
             if let Ok(prefix) = std::str::from_utf8(&output.stdout) {
@@ -638,13 +638,14 @@ fn resolve_npm_prefix(
     parsed: &NpmGlobalCommand,
     npm_path: &AbsolutePath,
     node_dir: &AbsolutePathBuf,
+    env: &ToolPathEnv,
 ) -> AbsolutePathBuf {
     if let Some(ref prefix) = parsed.explicit_prefix {
         if let Ok(cwd) = current_dir() {
             return cwd.join(prefix);
         }
     }
-    get_npm_global_prefix(npm_path, node_dir)
+    get_npm_global_prefix(npm_path, node_dir, env)
 }
 
 /// Resolve the package-manager binary for a core shim.
@@ -673,21 +674,30 @@ async fn resolve_package_manager_tool(
     Ok(Some(bin_path))
 }
 
-async fn prepend_js_child_process_path_env(
+async fn prepare_js_child_path(
     cwd: &AbsolutePath,
     node_bin_dir: &AbsolutePath,
-) -> Result<(), Error> {
-    let _ = prepend_to_path_env(node_bin_dir, PrependOptions::default());
-
-    let Some(npm_path) = resolve_package_manager_tool(cwd, "npm").await? else {
-        return Ok(());
-    };
-    if let Some(pm_bin_dir) = npm_path.parent()
-        && pm_bin_dir != node_bin_dir
-    {
-        let _ = prepend_to_path_env(pm_bin_dir, PrependOptions::default());
+) -> Result<ToolPathEnv, Error> {
+    let mut env = ToolPathEnv::from_env();
+    env.prepend(node_bin_dir, &["node"], PrependOptions::default())?;
+    if let Some(npm_path) = resolve_package_manager_tool(cwd, "npm").await? {
+        if let Some(bin_dir) = npm_path.parent() {
+            env.prepend(bin_dir, PackageManagerType::Npm.bin_names(), PrependOptions::default())?;
+        }
+    } else {
+        // Bundled npm belongs to the selected runtime, not an ancestor's runtime.
+        let tools: Vec<_> = PackageManagerType::Npm
+            .bin_names()
+            .iter()
+            .copied()
+            .filter(|tool| {
+                let name = if cfg!(windows) { format!("{tool}.cmd") } else { (*tool).to_owned() };
+                node_bin_dir.join(name).as_path().is_file()
+            })
+            .collect();
+        env.prepend(node_bin_dir, &tools, PrependOptions::default())?;
     }
-    Ok(())
+    Ok(env)
 }
 
 /// Main shim dispatch entry point.
@@ -721,11 +731,8 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
         return crate::commands::vpr::execute_vpr(args, &cwd).await;
     }
 
-    // Check recursion prevention - if already in a shim context, passthrough directly
-    // Node/npm bin dirs are prepared for every managed invocation. Other package
-    // managers must resolve independently: their bin dirs may not be on PATH yet.
-    if std::env::var(RECURSION_ENV_VAR).is_ok() && matches!(tool, "node" | "npm" | "npx") {
-        tracing::debug!("recursion prevention enabled for core tool");
+    if ToolPathEnv::from_env().contains(tool) {
+        tracing::debug!("tool path already injected: {tool}");
         return passthrough_to_system(tool, args);
     }
 
@@ -741,12 +748,19 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
         tracing::debug!("system-first mode enabled");
         // In system-first mode, try to find system tool first
         if let Some(system_path) = find_system_tool(tool) {
-            if PackageManagerType::from_tool(tool).is_some()
-                && let Err(error) = prepare_node_path_for_system_package_manager().await
-            {
-                eprintln!("vp: Failed to prepare Node.js for system package manager: {error}");
-                return 1;
-            }
+            let child_env = if PackageManagerType::from_tool(tool).is_some() {
+                match prepare_node_path_for_system_package_manager().await {
+                    Ok(env) => env,
+                    Err(error) => {
+                        eprintln!(
+                            "vp: Failed to prepare Node.js for system package manager: {error}"
+                        );
+                        return 1;
+                    }
+                }
+            } else {
+                ToolPathEnv::from_env()
+            };
             // Append current bin_dir to VP_BYPASS to prevent infinite loops
             // when multiple vite-plus installations exist in PATH.
             // The next installation will filter all accumulated paths.
@@ -764,7 +778,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
                     std::env::set_var(env_vars::VP_BYPASS, bypass_val);
                 }
             }
-            return exec::exec_tool(&system_path, args);
+            return exec::exec_tool(&system_path, args, child_env);
         }
         // Fall through to managed if system not found
     }
@@ -787,7 +801,9 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     // Ensure Node.js is installed and locate its binary for PATH preparation.
     // Package-manager shims can use their own declared version, but JS-based
     // package managers still need the Node.js runtime selected by its mode.
-    let system_node = if PackageManagerType::from_tool(tool).is_some() {
+    let system_node = if ToolPathEnv::from_env().contains("node") {
+        find_system_tool("node")
+    } else if PackageManagerType::from_tool(tool).is_some() {
         match config::load_config().await {
             Ok(config) if config.node_shim_mode == ShimMode::SystemFirst => {
                 find_system_tool("node")
@@ -857,14 +873,19 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     // bin dir available for JS package-manager shims, and put a separately
     // installed PM bin dir first so nested invocations see the same PM version.
     let node_bin_dir = node_path.parent().expect("Node has no parent directory");
-    if let Err(e) = prepend_js_child_process_path_env(&cwd, node_bin_dir).await {
-        eprintln!("vp: Failed to resolve package manager for child process PATH: {e}");
-        return 1;
-    }
-    if let Some(pm_bin_dir) = tool_path.parent()
-        && pm_bin_dir != node_bin_dir
+    let mut child_env = match prepare_js_child_path(&cwd, node_bin_dir).await {
+        Ok(env) => env,
+        Err(error) => {
+            eprintln!("vp: Failed to prepare child process PATH: {error}");
+            return 1;
+        }
+    };
+    if let Some(kind) = PackageManagerType::from_tool(tool)
+        && let Some(bin_dir) = tool_path.parent()
+        && let Err(error) = child_env.prepend(bin_dir, kind.bin_names(), PrependOptions::default())
     {
-        let _ = prepend_to_path_env(pm_bin_dir, PrependOptions::default());
+        eprintln!("vp: Failed to prepare package manager PATH: {error}");
+        return 1;
     }
 
     // Optional debug env vars
@@ -884,27 +905,17 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
         }
     }
 
-    // Node can launch arbitrary scripts, including the local Vite+ CLI.
-    // Its resolved bin directory is already first on PATH, so nested `node`
-    // calls cannot loop through the shim.
-    if tool != "node" {
-        // SAFETY: Setting env vars at this point before exec is safe
-        unsafe {
-            std::env::set_var(RECURSION_ENV_VAR, "1");
-        }
-    }
-
     // For npm install/uninstall -g, use spawn+wait so we can post-check/cleanup binaries
     if tool == "npm" {
         if let Some(parsed) = parse_npm_global_install(args) {
-            let exit_code = exec::spawn_tool(&tool_path, args);
+            let exit_code = exec::spawn_tool(&tool_path, args, child_env.clone());
             if exit_code == 0 {
                 let node_dir = node_prefix_from_binary(&node_path);
                 let node_version = resolution.as_ref().map_or_else(
                     || read_node_version(&node_path).unwrap_or_else(|| "unknown".into()),
                     |resolution| resolution.version.clone(),
                 );
-                let npm_prefix = resolve_npm_prefix(&parsed, &tool_path, &node_dir);
+                let npm_prefix = resolve_npm_prefix(&parsed, &tool_path, &node_dir, &child_env);
                 check_npm_global_install_result(
                     &parsed.packages,
                     original_path.as_deref(),
@@ -919,9 +930,9 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
         if let Some(parsed) = parse_npm_global_uninstall(args) {
             // Collect bin names before uninstall (package.json will be gone after)
             let node_dir = node_prefix_from_binary(&node_path);
-            let npm_prefix = resolve_npm_prefix(&parsed, &tool_path, &node_dir);
+            let npm_prefix = resolve_npm_prefix(&parsed, &tool_path, &node_dir, &child_env);
             let bin_names = collect_bin_names_from_npm(&parsed.packages, &npm_prefix, &node_dir);
-            let exit_code = exec::spawn_tool(&tool_path, args);
+            let exit_code = exec::spawn_tool(&tool_path, args, child_env);
             if exit_code == 0 {
                 remove_npm_global_uninstall_links(&bin_names, &npm_prefix);
             }
@@ -930,7 +941,7 @@ pub async fn dispatch(tool: &str, args: &[String]) -> i32 {
     }
 
     // Execute the tool (normal path — exec replaces process on Unix)
-    exec::exec_tool(&tool_path, args)
+    exec::exec_tool(&tool_path, args, child_env)
 }
 
 fn node_prefix_from_binary(node_path: &AbsolutePath) -> AbsolutePathBuf {
@@ -949,14 +960,15 @@ fn read_node_version(node_path: &AbsolutePath) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().trim_start_matches('v').to_string())
 }
 
-async fn prepare_node_path_for_system_package_manager() -> Result<(), Error> {
+async fn prepare_node_path_for_system_package_manager() -> Result<ToolPathEnv, Error> {
+    let mut env = ToolPathEnv::from_env();
     let config = config::load_config().await?;
     if config.node_shim_mode == ShimMode::SystemFirst
         && let Some(node) = find_system_tool("node")
         && let Some(bin_dir) = node.parent()
     {
-        let _ = prepend_to_path_env(bin_dir, PrependOptions::default());
-        return Ok(());
+        env.prepend(bin_dir, &["node"], PrependOptions::default())?;
+        return Ok(env);
     }
 
     let cwd = current_dir()?;
@@ -965,8 +977,8 @@ async fn prepare_node_path_for_system_package_manager() -> Result<(), Error> {
         ensure_installed(&resolution.version).await.map_err(|error| Error::Other(error.into()))?;
     let bin_dir =
         node.parent().ok_or_else(|| Error::Other("Node.js has no bin directory".into()))?;
-    let _ = prepend_to_path_env(bin_dir, PrependOptions::default());
-    Ok(())
+    env.prepend(bin_dir, &["node"], PrependOptions::default())?;
+    Ok(env)
 }
 
 /// Dispatch a package binary shim.
@@ -988,7 +1000,7 @@ async fn dispatch_package_binary(tool: &str, args: &[String]) -> i32 {
         }
     };
 
-    let (program, mut full_args) =
+    let (program, mut full_args, child_env) =
         match package_binary_invocation(&package_metadata, tool, &package_metadata.platform.node)
             .await
         {
@@ -1001,10 +1013,10 @@ async fn dispatch_package_binary(tool: &str, args: &[String]) -> i32 {
     // Native binaries have no leading args; exec with the caller's slice
     // instead of cloning every argument.
     if full_args.is_empty() {
-        return exec::exec_tool(&program, args);
+        return exec::exec_tool(&program, args, child_env);
     }
     full_args.extend(args.iter().cloned());
-    exec::exec_tool(&program, &full_args)
+    exec::exec_tool(&program, &full_args, child_env)
 }
 
 /// Resolve how to invoke a package binary installed via `vp install -g` with
@@ -1015,7 +1027,7 @@ pub(crate) async fn package_binary_invocation(
     metadata: &PackageMetadata,
     tool: &str,
     node_version: &str,
-) -> Result<(AbsolutePathBuf, Vec<String>), String> {
+) -> Result<(AbsolutePathBuf, Vec<String>, ToolPathEnv), String> {
     let node_path = ensure_installed(node_version)
         .await
         .map_err(|e| format!("Failed to install Node {node_version}: {e}"))?;
@@ -1027,21 +1039,22 @@ pub(crate) async fn package_binary_invocation(
     // Prepare environment for recursive invocations
     let node_bin_dir =
         node_path.parent().ok_or_else(|| "Node has no parent directory".to_string())?;
-    if let Ok(cwd) = current_dir() {
-        prepend_js_child_process_path_env(&cwd, node_bin_dir).await.map_err(|e| {
-            format!("Failed to resolve package manager for child process PATH: {e}")
-        })?;
+    let child_env = if let Ok(cwd) = current_dir() {
+        prepare_js_child_path(&cwd, node_bin_dir).await.map_err(|error| error.to_string())?
     } else {
-        let _ = prepend_to_path_env(node_bin_dir, PrependOptions::default());
-    }
+        let mut env = ToolPathEnv::from_env();
+        env.prepend(node_bin_dir, &["node"], PrependOptions::default())
+            .map_err(|error| error.to_string())?;
+        env
+    };
 
     // JS binaries (determined at install time and stored in metadata) run
     // through node; native executables run directly.
     if metadata.is_js_binary(tool) {
         let pre_args = vec![binary_path.as_path().display().to_string()];
-        Ok((node_path, pre_args))
+        Ok((node_path, pre_args, child_env))
     } else {
-        Ok((binary_path, Vec::new()))
+        Ok((binary_path, Vec::new(), child_env))
     }
 }
 
@@ -1121,7 +1134,7 @@ pub(crate) fn locate_package_binary(
 /// Bypass shim and use system tool.
 fn bypass_to_system(tool: &str, args: &[String]) -> i32 {
     match find_system_tool(tool) {
-        Some(system_path) => exec::exec_tool(&system_path, args),
+        Some(system_path) => exec::exec_tool(&system_path, args, ToolPathEnv::from_env()),
         None => {
             eprintln!("vp: VP_BYPASS is set but no system '{tool}' found in PATH");
             1
@@ -1129,16 +1142,12 @@ fn bypass_to_system(tool: &str, args: &[String]) -> i32 {
     }
 }
 
-/// Passthrough mode for recursion prevention.
-///
-/// When VP_TOOL_RECURSION is set, we skip version resolution
-/// and execute the tool directly using the current PATH.
-/// This prevents infinite loops when a managed tool invokes another shim.
+/// Reuse an injected tool through PATH, excluding vp shims to avoid a loop.
 fn passthrough_to_system(tool: &str, args: &[String]) -> i32 {
     match find_system_tool(tool) {
-        Some(system_path) => exec::exec_tool(&system_path, args),
+        Some(system_path) => exec::exec_tool(&system_path, args, ToolPathEnv::from_env()),
         None => {
-            eprintln!("vp: Recursion detected but no '{tool}' found in PATH (excluding shims)");
+            eprintln!("vp: Injected tool '{tool}' not found in PATH (excluding shims)");
             1
         }
     }
@@ -2193,7 +2202,8 @@ mod tests {
             };
             // Use a dummy npm_path and node_dir (should not be reached)
             let dummy_dir = temp_path.join("dummy");
-            let result = resolve_npm_prefix(&parsed, &dummy_dir, &dummy_dir);
+            let result =
+                resolve_npm_prefix(&parsed, &dummy_dir, &dummy_dir, &ToolPathEnv::from_env());
             // Should resolve relative to cwd, not fall back to get_npm_global_prefix
             assert!(
                 result.as_path().ends_with("custom"),
@@ -2214,7 +2224,7 @@ mod tests {
             explicit_prefix: Some(abs_prefix.as_path().display().to_string()),
         };
         let dummy_dir = temp_path.join("dummy");
-        let result = resolve_npm_prefix(&parsed, &dummy_dir, &dummy_dir);
+        let result = resolve_npm_prefix(&parsed, &dummy_dir, &dummy_dir, &ToolPathEnv::from_env());
         assert_eq!(
             result.as_path(),
             abs_prefix.as_path(),
@@ -2233,7 +2243,7 @@ mod tests {
         let dummy_dir = temp_path.join("dummy");
         // This will fall back to get_npm_global_prefix, which may fail but should
         // ultimately return node_dir as the final fallback
-        let result = resolve_npm_prefix(&parsed, &dummy_dir, &dummy_dir);
+        let result = resolve_npm_prefix(&parsed, &dummy_dir, &dummy_dir, &ToolPathEnv::from_env());
         assert!(!result.as_path().as_os_str().is_empty());
     }
 }
