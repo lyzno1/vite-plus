@@ -556,6 +556,7 @@ async fn install_one(
     let output = Command::new(npm_path.as_path())
         .args(["install", "-g", "--no-fund", &package_spec])
         .env("npm_config_prefix", install_dir.as_path())
+        .env("npm_config_update_notifier", "false")
         .envs(env.into_envs())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
